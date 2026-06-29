@@ -1,0 +1,7 @@
+model_name_or_path: Qwen/Qwen2.5-0.5B-Instruct
+train_data: data/sft_train_sample.jsonl
+output_dir: outputs/sft
+learning_rate: 2.0e-5
+num_train_epochs: 1
+per_device_train_batch_size: 1
+max_len: 2048
