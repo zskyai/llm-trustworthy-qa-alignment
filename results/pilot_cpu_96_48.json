@@ -1,0 +1,70 @@
+{
+  "status": "local_cpu_pilot",
+  "important_boundary": "Protocol smoke on a balanced public-data subset; not a large-scale training result or clinical accuracy claim.",
+  "model": "Qwen2.5-0.5B-Instruct",
+  "device": "cpu",
+  "dataset": {
+    "source_records": 3593,
+    "train_pool": 2899,
+    "validation_pool": 694,
+    "pilot_train": 96,
+    "pilot_validation": 48,
+    "generation_eval": 24,
+    "split_rule": "SHA1(source:document_id) modulo 5; document-level fixed split",
+    "categories": ["pubmed_maybe", "pubmed_no", "pubmed_yes", "qasper_answerable", "qasper_unanswerable"]
+  },
+  "config": {
+    "max_length": 384,
+    "max_new_tokens": 64,
+    "sft_epochs": 1,
+    "dpo_epochs": 1,
+    "sft_learning_rate": 0.0002,
+    "dpo_learning_rate": 0.0001,
+    "beta": 0.1,
+    "seed": "see local run manifest; preserve before comparing runs"
+  },
+  "metrics": {
+    "base": {
+      "pair_examples": 48,
+      "pair_preference_accuracy": 0.6458333333,
+      "generation_examples": 24,
+      "token_f1": 0.1676814900,
+      "pubmedqa_label_accuracy": 0.4,
+      "qasper_answerable_non_refusal_rate": 0.0,
+      "qasper_refusal_recall": 0.5,
+      "qasper_refusal_balanced_accuracy": 0.25,
+      "valid_citation_rate_on_answerable": 0.05,
+      "mean_generated_tokens": 63.4583333333
+    },
+    "sft": {
+      "pair_examples": 48,
+      "pair_preference_accuracy": 0.875,
+      "generation_examples": 24,
+      "token_f1": 0.2303649865,
+      "pubmedqa_label_accuracy": 0.2666666667,
+      "qasper_answerable_non_refusal_rate": 0.8,
+      "qasper_refusal_recall": 0.5,
+      "qasper_refusal_balanced_accuracy": 0.65,
+      "valid_citation_rate_on_answerable": 0.95,
+      "mean_generated_tokens": 24.6666666667
+    },
+    "sft_dpo": {
+      "pair_examples": 48,
+      "pair_preference_accuracy": 0.7916666667,
+      "generation_examples": 24,
+      "token_f1": 0.1645586627,
+      "pubmedqa_label_accuracy": 0.2,
+      "qasper_answerable_non_refusal_rate": 0.6,
+      "qasper_refusal_recall": 1.0,
+      "qasper_refusal_balanced_accuracy": 0.8,
+      "valid_citation_rate_on_answerable": 0.7,
+      "mean_generated_tokens": 62.4583333333
+    }
+  },
+  "interpretation": [
+    "SFT improved formatting and answerable non-refusal on this small subset, while PubMedQA label accuracy decreased.",
+    "DPO improved refusal recall and balanced accuracy but reduced token F1 and valid citation rate.",
+    "The observed trade-off is a hypothesis from a small pilot; validate with larger, matched hard negatives, SFT anchoring and early stopping."
+  ]
+}
+
