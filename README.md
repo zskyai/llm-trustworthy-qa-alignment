@@ -59,6 +59,10 @@ tests/      损失公式、数值边界与梯度方向测试
 - [ ] 在同一数据切分上完成 SFT/DPO/SimPO/ORPO 对比训练
 - [ ] 输出评测报告
 
+`results/pilot_cpu_96_48.json` records a small local CPU pilot with explicit denominators and split
+metadata. It is included for reproducibility and failure analysis only; it is not evidence of a
+large-scale training gain or medical accuracy.
+
 当前新增内容是损失层和单元测试，不代表已用新目标完成模型训练，也不代表已得到 SimPO/ORPO 的指标提升。
 
 ## 后续实验矩阵
