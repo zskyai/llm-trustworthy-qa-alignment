@@ -1,0 +1,51 @@
+{
+  "dataset": {
+    "papers": 888,
+    "questions": 2593,
+    "train_questions": 2068,
+    "validation_questions": 525,
+    "test_used": false
+  },
+  "baselines": {
+    "full": {
+      "queries": 525,
+      "answerable_queries": 462,
+      "evidence_recall": 0.5276154401154401,
+      "evidence_precision": 0.018306882969439008,
+      "evidence_f1": 0.03441038533432354,
+      "long_document": {
+        "count": 418,
+        "evidence_recall": 0.5378603603603603
+      },
+      "implementation": "all paragraphs"
+    },
+    "bm25": {
+      "queries": 525,
+      "answerable_queries": 462,
+      "evidence_recall": 0.2636363636363636,
+      "evidence_precision": 0.04329004329004329,
+      "evidence_f1": 0.07193566343680934,
+      "long_document": {
+        "count": 418,
+        "evidence_recall": 0.24945945945945946
+      },
+      "implementation": "lexical paragraph overlap"
+    },
+    "dense": {
+      "status": "not_run",
+      "reason": "pass --dense-model with a local sentence-transformers checkpoint"
+    },
+    "extractive": {
+      "queries": 525,
+      "answerable_queries": 462,
+      "evidence_recall": 0.2636363636363636,
+      "evidence_precision": 0.04329004329004329,
+      "evidence_f1": 0.07193566343680934,
+      "long_document": {
+        "count": 418,
+        "evidence_recall": 0.24945945945945946
+      },
+      "implementation": "lexical paragraph overlap"
+    }
+  }
+}

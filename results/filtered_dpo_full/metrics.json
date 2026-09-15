@@ -1,0 +1,76 @@
+{
+  "status": "real_model_full_filtered_training",
+  "model_path": "..\\..\\models\\Qwen2.5-0.5B-Instruct",
+  "pair_files": [
+    "results\\model_rejection_audit_full_nli\\filtered.jsonl"
+  ],
+  "preference_source": "base_model_generation_then_real_NLI_filter",
+  "input_pairs": 767,
+  "train_pairs": 712,
+  "held_out_pairs": 55,
+  "train_documents": 462,
+  "held_out_documents": 34,
+  "split": "SHA1(source:document_id), with deterministic document fallback",
+  "test_used": false,
+  "seed": 42,
+  "max_length": 256,
+  "batch_size": 4,
+  "beta": 0.1,
+  "dpo_learning_rate": 1e-05,
+  "completion_logprob_reduction": "mean_per_non_prompt_token",
+  "sft_seconds": 1147.1817274999994,
+  "dpo_seconds": 2178.3712473999985,
+  "sft_loss": {
+    "first": 2.1100823879241943,
+    "last": 4.276301860809326,
+    "mean": 2.182544160592422
+  },
+  "dpo_loss": {
+    "first": 0.6932610869407654,
+    "last": 0.007470476441085339,
+    "mean": 0.13752534118869467
+  },
+  "stages": {
+    "base_lora": {
+      "train": {
+        "pairs": 712,
+        "preference_accuracy": 0.6853932584269663,
+        "mean_margin": 0.40141610349162243
+      },
+      "held_out": {
+        "pairs": 55,
+        "preference_accuracy": 0.7272727272727273,
+        "mean_margin": 0.34437634944915774
+      }
+    },
+    "sft": {
+      "train": {
+        "pairs": 712,
+        "preference_accuracy": 0.9957865168539326,
+        "mean_margin": 3.69186279412066
+      },
+      "held_out": {
+        "pairs": 55,
+        "preference_accuracy": 0.9636363636363636,
+        "mean_margin": 3.538380826603283
+      }
+    },
+    "sft_dpo": {
+      "train": {
+        "pairs": 712,
+        "preference_accuracy": 0.9971910112359551,
+        "mean_margin": 58.634500241011715
+      },
+      "held_out": {
+        "pairs": 55,
+        "preference_accuracy": 0.9818181818181818,
+        "mean_margin": 57.33754839463668
+      }
+    }
+  },
+  "limitations": [
+    "Only NLI-filtered generated pairs are used",
+    "Preference metrics do not replace answer/citation evaluation",
+    "The official Qasper test split is not locally available and remains unused"
+  ]
+}

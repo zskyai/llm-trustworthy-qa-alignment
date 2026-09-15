@@ -1,0 +1,23 @@
+{
+  "input_files": [
+    "results\\model_rejections_full_train_v2.jsonl"
+  ],
+  "input_pairs": 2862,
+  "kept_pairs": 767,
+  "filtered_pairs": 2095,
+  "filter_pass_rate": 0.26799440950384346,
+  "counts": {
+    "filtered": 2095,
+    "kept": 767
+  },
+  "human_sample_size": 100,
+  "nli": {
+    "status": "real_model",
+    "model_path": "..\\..\\models\\cross-encoder__nli-deberta-v3-base",
+    "threshold": 0.5,
+    "pairs_scored": 10840,
+    "pair_pass_rate": 0.3252969951083159
+  },
+  "manual_review_required": true,
+  "test_used": false
+}

@@ -1,21 +1,20 @@
-"""Build preference pairs for trustworthy QA alignment.
-
-This is a placeholder script. Replace sample records with public or self-built data.
-"""
-
-import json
+"""Materialize preference pairs from official Qasper/PubMedQA data."""
+from __future__ import annotations
+import argparse, json
 from pathlib import Path
+from real_pipeline import pubmedqa_records, qasper_records, split
 
-out = Path("data/dpo_train_sample.jsonl")
-out.parent.mkdir(parents=True, exist_ok=True)
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--qasper", type=Path, required=True)
+    p.add_argument("--pubmedqa", type=Path)
+    p.add_argument("--output-dir", type=Path, required=True)
+    a = p.parse_args()
+    rows = qasper_records(a.qasper) + (pubmedqa_records(a.pubmedqa) if a.pubmedqa else [])
+    train, valid = split(rows); a.output_dir.mkdir(parents=True, exist_ok=True)
+    for name, values in (("train", train), ("validation", valid)):
+        (a.output_dir / f"{name}.jsonl").write_text("\n".join(json.dumps(x, ensure_ascii=False) for x in values) + "\n", encoding="utf-8")
+    print(json.dumps({"records": len(rows), "train": len(train), "validation": len(valid)}, indent=2))
 
-sample = {
-    "prompt": "根据给定证据回答问题，并在证据不足时说明无法确定。\n问题：该制度是否适用于外包人员？\n证据：制度原文仅说明适用于正式员工。",
-    "chosen": "根据当前证据，无法确定该制度是否适用于外包人员。现有证据只明确提到正式员工，未覆盖外包人员，因此不应扩大解释。",
-    "rejected": "该制度适用于外包人员，因为外包人员也属于公司管理范围。",
-}
-
-with out.open("w", encoding="utf-8") as f:
-    f.write(json.dumps(sample, ensure_ascii=False) + "\n")
-
-print(f"wrote {out}")
+if __name__ == "__main__":
+    main()

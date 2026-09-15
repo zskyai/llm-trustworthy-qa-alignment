@@ -1,0 +1,14 @@
+{
+  "status": "complete",
+  "input": "results\\pairs_from_repo\\train.jsonl",
+  "output": "results\\model_rejections_full_train_v2.jsonl",
+  "model_path": "..\\..\\models\\Qwen2.5-0.5B-Instruct",
+  "seed": 42,
+  "records": 2862,
+  "generated_records": 2862,
+  "split": "training records only; paper/document-level validation excluded",
+  "test_used": false,
+  "batch_size": 16,
+  "max_new_tokens": 32,
+  "elapsed_seconds": 2323.7593301000006
+}
