@@ -26,7 +26,16 @@
 - `simpo_loss`：使用无 reference 的长度归一化 reward，显式加入 `gamma / beta` 目标 margin，并支持可选 SFT anchor。
 - `orpo_loss`：将 chosen 回答的 SFT NLL 与 odds-ratio 偏好损失合并；使用分段 `log1mexp` 处理 log-prob 接近 0 的数值边界。
 
-`tests/test_losses.py` 使用 toy tensor 检查 completion mask/长度归一化、DPO 的 `policy == reference` 边界、SimPO 目标 margin、ORPO 极端 log-prob 的有限值，以及三种损失对 chosen/rejected 的梯度方向。
+`src/structured_answer.py` 定义严格的 `final_answer/citations/confidence/abstained/refusal_reason`
+协议，统一 `[E1]` citation ID，拒绝非法 JSON、非法 citation 和无拒答原因的 abstention。
+`src/preference_data.py` 提供同 prompt、同事实骨架的 invalid-citation、citation-removed、
+unsupported-extension、over-refusal 和 polarity-flip hard negative 构造，并返回可审计的
+校验报告。`src/selective_calibration.py` 实现只在 validation 上拟合的 coverage-risk
+阈值、selective risk 和 ECE；`src/evaluation.py` 统一计算 token-F1、citation precision/
+recall/support、拒答 precision/recall、过度拒答率、PubMedQA macro-F1 和长文档分桶。
+
+`tests/` 还覆盖结构化答案、citation ID 一致性、hard-negative 过滤、coverage-risk 校准和
+ECE；这些测试不依赖模型权重，适合在训练前后和 CI 中运行。
 
 运行测试：
 
