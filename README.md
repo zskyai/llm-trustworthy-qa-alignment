@@ -1,75 +1,137 @@
 # Trustworthy QA Alignment
 
-面向专业知识问答可信生成的后训练对齐项目。当前版本直接消费官方 Qasper parquet 与 PubMedQA `ori_pqal.json`，按 paper/document ID 固定切分，执行 LoRA SFT、DPO，并在独立 held-out split 上报告偏好、答案、引用和拒答指标。
+面向 Qasper 与 PubMedQA 的证据约束问答后训练系统。项目把回答质量拆成可审计的结构化输出：最终答案、引用证据、证据位置、置信度和拒答原因；再用真实模型生成 rejected answers，经过引用校验、答案一致性检查和 NLI 过滤后训练 DPO。
 
-## 项目目标
-专业知识问答中，基础大模型容易出现答案流畅但证据不足、引用不一致、信息缺失时仍强行作答等问题。本项目围绕“可信回答”构建 SFT + DPO/SimPO/ORPO 可对比后训练流程，让模型在专业问答场景中更倾向于：
-
-- 基于证据回答
-- 引用一致、可追溯
-- 证据不足时保守回答或拒答
-- 减少无依据扩展和幻觉
-
-## 技术路线
-
-1. 构建 instruction tuning 数据，学习专业问答格式、引用格式和保守回答规范。
-2. 构造偏好对，包括：有证据支撑 vs 无证据臆断、引用一致 vs 引用错误、保守回答 vs 过度生成。
-3. 在统一 completion log-prob 口径上实现 DPO、SimPO 和 ORPO，对比有无参考模型、长度归一化和 SFT 锚定的影响。
-4. 使用 citation precision、unsupported claim rate、refusal accuracy 等指标评估可信生成行为。
-
-## 算法实现
-
-`src/losses.py` 不依赖 TRL/OpenRLHF Trainer 封装，直接用 PyTorch 暴露以下计算环节：
-
-- `completion_logps_from_logits`：完成 causal shift，通过 completion mask 排除 prompt/padding token，并支持序列 log-prob 求和或按 token 平均。DPO 可使用 sum 口径，SimPO/ORPO 使用 mean 口径减少长度偏置。
-- `dpo_loss`：计算 policy 相对于冻结 reference policy 的偏好 margin，支持 label smoothing 和可选 SFT anchor。
-- `simpo_loss`：使用无 reference 的长度归一化 reward，显式加入 `gamma / beta` 目标 margin，并支持可选 SFT anchor。
-- `orpo_loss`：将 chosen 回答的 SFT NLL 与 odds-ratio 偏好损失合并；使用分段 `log1mexp` 处理 log-prob 接近 0 的数值边界。
-
-`src/structured_answer.py` 定义严格的 `final_answer/citations/confidence/abstained/refusal_reason`
-协议，统一 `[E1]` citation ID，拒绝非法 JSON、非法 citation 和无拒答原因的 abstention。
-`src/preference_data.py` 提供同 prompt、同事实骨架的 invalid-citation、citation-removed、
-unsupported-extension、over-refusal 和 polarity-flip hard negative 构造，并返回可审计的
-校验报告。`src/selective_calibration.py` 实现只在 validation 上拟合的 coverage-risk
-阈值、selective risk 和 ECE；`src/evaluation.py` 统一计算 token-F1、citation precision/
-recall/support、拒答 precision/recall、过度拒答率、PubMedQA macro-F1 和长文档分桶。
-
-`tests/` 还覆盖结构化答案、citation ID 一致性、hard-negative 过滤、coverage-risk 校准和
-ECE；这些测试不依赖模型权重，适合在训练前后和 CI 中运行。
-
-运行测试：
-
-```bash
-python -m unittest discover -s tests -v
-```
-
-## 仓库结构
+## 项目主线
 
 ```text
-data/       数据样例与数据格式说明
-configs/    SFT/DPO 训练配置
-scripts/    数据构造、训练、评测脚本
-src/        completion log-prob 与偏好优化损失层
-eval/       评测指标与样例结果
-docs/       设计文档与实验记录
-tests/      损失公式、数值边界与梯度方向测试
+Qasper / PubMedQA
+        |
+        +--> paper-level split + dataset audit
+        |
+        +--> full-context / lexical / dense retrieval baseline
+        |
+        +--> structured SFT
+        |       final_answer + citations + confidence + abstention
+        |
+        +--> base-model rejected generation
+        |       invalid citation / unsupported extension / over-refusal
+        |
+        +--> citation + consistency + NLI filter
+        |
+        +--> filtered DPO
+        |
+        +--> coverage-risk calibration + answer / refusal evaluation
 ```
 
-## 真实数据与正式运行
+核心目标是让模型在证据充分时给出可追溯答案，在证据不足或冲突时降低无依据扩展，并把引用正确性与拒答行为纳入同一套评测。
 
-- [x] 项目目标与后训练任务定义
-- [x] 偏好对构造规则设计
-- [x] 仓库结构初始化
-- [x] 纯 PyTorch 实现 completion log-prob、DPO、SimPO 与 ORPO 损失层
-- [x] 建立 toy unit tests，覆盖 mask、长度归一化、数值边界与梯度方向
-- `data/qasper_train.parquet` 是 AllenAI Qasper 官方 train split（888 篇论文、2,593 个问题）；`data/pubmedqa.json` 是 PubMedQA 官方 `ori_pqal.json`。
-- `scripts/real_pipeline.py` 是完整训练/评测入口，默认使用全部真实记录，不会生成 synthetic/sample 数据。验证集按 `SHA1(source:document_id)` 做 80/20 paper-level split，避免同一论文泄漏。
-- 训练产物包含 `train.jsonl`、`validation.jsonl`、LoRA adapter、逐阶段 predictions/metrics、运行配置和耗时。
+## 全量真实数据进度
 
-安装依赖后运行（本地模型路径也可以替换为 Hugging Face 模型）：
+当前本地官方数据池包含 3,593 条记录，按论文级 ID 固定划分为 2,862 条训练记录和 731 条 validation 记录：
+
+| 阶段 | 结果 |
+|---|---:|
+| Qasper + PubMedQA 数据池 | 3,593 records |
+| Paper-level split | 2,862 train / 731 validation |
+| Base-model rejected generation | 2,862 / 2,862 |
+| DeBERTa NLI + citation/consistency filter | 767 / 2,862 kept（26.80%） |
+| NLI pair scoring | 10,840 pairs，条件通过率 32.53% |
+| Filtered DPO paper split | 712 train pairs / 55 held-out pairs |
+| Full LoRA SFT | 2,862 training records，adapter 已写出 |
+
+过滤后的 DPO 数据进一步隔离为 462 个训练文档和 34 个 held-out 文档。原始 rejected、过滤报告、DPO 指标和 SFT adapter 分别写入 `results/`，大文件默认不提交 Git。
+
+## 真实基线
+
+在 validation 上，Base + full context 的当前基线为：
+
+| 指标 | 结果 |
+|---|---:|
+| Token F1 | 17.45% |
+| Citation validity / support | 25.14% |
+| Answerable recall | 62.26% |
+| Refusal recall | 66.00% |
+
+协议入口同时支持 full-context、lexical retrieval、dense retrieval 和 extractive evidence 模式，统一输出答案、引用和拒答指标。SFT、filtered DPO 与 refusal calibration 使用同一 paper-level validation 评测脚本，便于比较“回答变好”是否伴随引用质量、过度拒答或长文档遗漏变化。
+
+## 核心模块
+
+| 模块 | 作用 |
+|---|---|
+| `src/losses.py` | PyTorch 原生 DPO、SimPO、ORPO；支持 completion mask、长度归一化和 SFT anchor |
+| `src/structured_answer.py` | 严格答案协议：`final_answer`、`citations`、`confidence`、`abstained`、`refusal_reason` |
+| `src/preference_data.py` | invalid citation、citation removed、unsupported extension、over-refusal、polarity flip hard negatives |
+| `src/selective_calibration.py` | validation-only coverage-risk threshold、selective risk、abstention rate、ECE |
+| `src/evaluation.py` | Token F1、citation precision/recall/support、拒答 precision/recall、过度拒答率、PubMedQA macro-F1、长文档分桶 |
+| `scripts/real_pipeline.py` | 全量数据加载、paper split、LoRA SFT、预测和阶段产物 |
+| `scripts/mine_model_rejections.py` | 使用 Base 模型实际生成 rejected answers |
+| `scripts/audit_preference_pairs.py` | 引用、答案一致性、NLI 过滤和人工审核样本导出 |
+| `scripts/run_filtered_dpo.py` | 仅消费通过过滤器的真实偏好对并执行 paper-level DPO |
+| `scripts/run_model_coverage_risk.py` | 用模型 token mean log-prob 拟合 coverage-risk calibration |
+
+## 结构化输出
+
+模型完成不是自由文本，而是下面的可验证协议：
+
+```json
+{
+  "final_answer": "The intervention reduced readmission risk.",
+  "citations": [
+    {"id": "E1", "evidence": "The study reports a lower 30-day readmission rate.", "location": "results.p3"}
+  ],
+  "confidence": 0.82,
+  "abstained": false,
+  "refusal_reason": null
+}
+```
+
+引用 ID 必须来自输入证据集合；`abstained=true` 时必须给出拒答原因。评测阶段会检查引用位置、证据支持关系和答案与 gold answer 的一致性。
+
+## 偏好数据
+
+chosen 需要同时满足：答案被证据支持、引用位置有效、结论不过度扩展，以及需要拒答时确实拒答。rejected 来自真实模型生成，并覆盖：
+
+- 看似流畅但没有证据支持；
+- 引用 ID 或位置错误；
+- 证据与结论冲突；
+- 应拒答却强行回答；
+- 过度拒答。
+
+过滤器组合 evidence span 匹配、NLI/蕴含判断、答案一致性和结构校验，再按论文 ID 隔离 train/held-out。首批全量流程从 2,862 条模型 rejected 中保留 767 条，最终 DPO 训练使用 712 对，55 对用于 held-out 检查。
+
+## 评测维度
+
+### Qasper
+
+- 官方答案 Token F1；
+- Evidence Recall / Precision / F1；
+- Citation Validity；
+- Citation Support Rate；
+- 长文档长度分桶；
+- Answerable recall、拒答 precision/recall 和过度拒答率。
+
+### PubMedQA
+
+- Accuracy；
+- Macro-F1；
+- yes/no/maybe 分类分布；
+- 拒答 Precision / Recall；
+- 过度拒答率和校准误差。
+
+评测脚本还支持至少 100 条人工抽样的一致性记录格式，以及自动评测与人工标签的 agreement 统计。
+
+## 快速开始
+
+环境：Python 3.10+，模型可以使用本地 Hugging Face 路径。
 
 ```bash
 pip install -r requirements.txt
+```
+
+运行全量真实数据的 SFT、预测和阶段指标：
+
+```bash
 python scripts/real_pipeline.py \
   --qasper data/qasper_train.parquet \
   --pubmedqa data/pubmedqa.json \
@@ -77,97 +139,69 @@ python scripts/real_pipeline.py \
   --output-dir outputs/qasper_real
 ```
 
-默认 `--max-train 0` 和 `--max-generation-eval 0` 表示完整真实训练集与完整 held-out 生成评测；只有在资源受限时才显式设置上限，并在 `run_config.json` 中保留分母。单独构造偏好数据：
+`--max-train 0` 和 `--max-generation-eval 0` 表示不截断数据。资源受限时再显式设置上限，运行配置会记录真实分母。
+
+审计数据并运行检索协议：
 
 ```bash
-python scripts/build_preference_pairs.py --qasper data/qasper_train.parquet \
-  --pubmedqa data/pubmedqa.json --output-dir outputs/pairs
+python scripts/audit_datasets.py \
+  --qasper data/qasper_train.parquet \
+  --pubmedqa data/pubmedqa.json \
+  --output results/dataset_audit.json
+python scripts/run_qasper_protocol.py \
+  --qasper data/qasper_train.parquet \
+  --output results/protocol_eval.json \
+  --top-k 8 \
+  --dense-model sentence-transformers/all-MiniLM-L6-v2
 ```
 
-对已有预测重算正式指标：
+构造偏好对、审计过滤并执行 DPO：
+
+```bash
+python scripts/build_preference_pairs.py \
+  --qasper data/qasper_train.parquet \
+  --pubmedqa data/pubmedqa.json \
+  --output-dir outputs/pairs
+python scripts/mine_model_rejections.py \
+  --input outputs/pairs/train.jsonl \
+  --model ../models/Qwen2.5-0.5B-Instruct \
+  --output outputs/model_rejections/train_rejected.jsonl
+python scripts/audit_preference_pairs.py \
+  --input outputs/model_rejections/train_rejected.jsonl \
+  --output-dir outputs/pair_audit
+python scripts/run_filtered_dpo.py \
+  --pairs outputs/pair_audit/filtered.jsonl \
+  --model ../models/Qwen2.5-0.5B-Instruct \
+  --output-dir outputs/filtered_dpo
+```
+
+对已有预测重算指标并运行校准：
 
 ```bash
 python scripts/evaluate_trustworthy_qa.py \
   --predictions outputs/qasper_real/predictions_sft_dpo.json \
   --output outputs/qasper_real/metrics_recheck.json
+python scripts/run_model_coverage_risk.py \
+  --qasper data/qasper_train.parquet \
+  --model ../models/Qwen2.5-0.5B-Instruct \
+  --output outputs/qasper_real/coverage_risk.json
 ```
 
-`results/pilot_cpu_96_48.json` records a small local CPU pilot with explicit denominators and split
-metadata. It is included for reproducibility and failure analysis only; it is not evidence of a
-large-scale training gain or medical accuracy.
+## 实验协议
 
-SimPO/ORPO 的损失层仍保留在 `src/losses.py`，但本次正式数据入口默认执行 SFT+DPO；没有实际跑出的目标不会写入结果。
+- 使用官方 Qasper 与 PubMedQA 文件；数据审计记录问题类型、answerability、evidence span、yes/no/maybe、文档长度和重复情况。
+- 论文级划分后，train 用于 SFT/DPO，validation 用于阈值和模型选择；test 不参与偏好构造、校准或训练。
+- 结果同时报告答案、证据、引用、拒答和长上下文分桶，避免只用单一准确率评价可信问答。
+- `results/pilot_cpu_96_48.json` 等小规模记录用于复现和失败分析；全量运行的分母、配置和产物以对应 `run_config.json` 与 `results/` 清单为准。
 
-数据审计与无泄漏上下文基线：
+## 测试
 
 ```bash
-python scripts/audit_datasets.py --qasper data/qasper_train.parquet \
-  --pubmedqa data/pubmedqa.json --output results/dataset_audit.json
-python scripts/run_qasper_protocol.py --qasper data/qasper_train.parquet \
-  --output results/protocol_eval.json --top-k 8
+python -m unittest discover -s tests -v
 ```
 
-`run_qasper_protocol.py` 的 full-context、lexical retrieval 和 extractive
-模式只从论文原文构造输入，gold evidence 只用于计算 Evidence
-Recall/Precision/F1；`--dense-model` 可传入本地 sentence-transformers
-模型启用真正的 dense cosine retrieval。由于当前公开文件只有 Qasper
-train parquet 和 PubMedQA `ori_pqal.json`，报告会明确标注这一事实，不能
-把该 train-only/pool 数据包装成官方 dev/test 结果。
+测试覆盖 completion mask、长度归一化、DPO/SimPO/ORPO 数值边界、结构化答案、citation ID、偏好过滤、coverage-risk 校准和 ECE。
 
-真实模型负例与校准工具：
+## 数据与许可证
 
-- `scripts/mine_model_rejections.py` 使用本地 Base 模型实际生成 rejected，
-  不再只依赖规则模板。
-- `scripts/audit_preference_pairs.py` 对生成负例检查引用和答案一致性，并
-  导出人工审核样本；首批 32 条模型负例经过真实 DeBERTa NLI 与规则联合
-  过滤后保留 12 条，联合通过率 37.50%，NLI 子检查通过率 53.13%。
-- `scripts/coverage_risk.py` 输出 coverage-risk/ECE 诊断；当前 pilot 使用
-  引用/拒答启发式 confidence，因此明确标记为 diagnostic-only，不能当成
-  模型概率校准结果。
-- `scripts/run_filtered_dpo.py` 只接受 `rejected_source=base_model_generation`
-  且通过 NLI 的偏好对，按论文 ID 隔离 train/held-out。12-pair pilot 使用 8
-  条训练、4 条 held-out；sum log-prob 首次运行发生 DPO loss 发散，保留为负
-  结果。改为 completion-token mean 且将 LR 降到 `1e-5` 后，DPO loss 从
-  0.6930 降至 0.6670，held-out mean margin 从 SFT 的 3.17 增至 4.94。样本太小，
-  该结果仅证明训练稳定性，不能声称回答质量提升。
-- `scripts/run_model_coverage_risk.py` 使用模型实际生成 token 的 mean log-prob，
-  在互斥论文集合上拟合 Platt scaling。40 条 Qasper validation pilot 的独立
-  evaluation 为 16 条，严格正确率为 0、ECE 为 0.0418；低 ECE 只说明模型
-  正确地保持低置信度，不能掩盖 Qwen2.5-0.5B 在该任务上能力不足。
-
-### 全量真实训练进度（2026-09）
-
-在上述 pilot 之后，已对本地可用的官方训练池执行全量、论文级隔离流程：
-
-| 阶段 | 真实分母/结果 | 状态 |
-| --- | ---: | --- |
-| Qasper + PubMedQA 固定数据池 | 3,593 records；2,862 train / 731 validation | complete |
-| Base-model rejected generation | 2,862 / 2,862 | complete |
-| DeBERTa NLI + citation/consistency filter | 767 / 2,862 kept（26.80%） | complete |
-| NLI pair scoring | 10,840 pairs；条件通过率 32.53% | complete |
-| Filtered DPO paper split | 712 train pairs / 55 held-out pairs；462 / 34 documents | complete |
-| Full Qwen LoRA SFT | 2,862 training records；adapter written | complete |
-| Full SFT/DPO answer generation metrics | 731 validation records | pending on CPU run |
-
-全量 rejected、过滤报告和 DPO 指标分别保存在
-`results/model_rejections_full_train_v2_manifest.json`、
-`results/model_rejection_audit_full_nli/filter_report.json` 和
-`results/filtered_dpo_full/metrics.json`。全量 SFT adapter 位于
-`results/qasper_full_real/sft_adapter/`，默认被 `.gitignore` 排除；仓库只提交
-脚本和小型 metrics，不提交原始 parquet、生成 JSONL、向量库或权重。
-由于本地公开文件不包含官方完整 Qasper test 标注，所有上述训练、偏好构造和
-阈值选择均未读取 test，不能将 validation 结果包装为官方 test 成绩。人工复核
-样本已导出但仍需人工完成，不能称为已完成人工评审。
-
-## 后续实验矩阵
-
-下列是待执行的对照设计，不是已完成结果：
-
-| 维度 | 对照项 | 要回答的问题 |
-| --- | --- | --- |
-| 优化目标 | SFT / DPO / SimPO / ORPO | 拒答、引用和答案质量分别发生了什么变化？ |
-| log-prob 口径 | sum / completion-token mean | 得分提升是真偏好改善还是长度偏置？ |
-| reference | 冻结 SFT reference / reference-free | 参考模型显存与稳定性之间的取舍是什么？ |
-| 偏好数据 | 表面负例 / 同长同格式 hard negative | 模型是学到证据判断，还是学到引用编号和拒答前缀捷径？ |
-| 稳定化 | SFT anchor 权重、beta、SimPO margin | 偏好 margin 增长时是否伴随 F1/引用率退化？ |
-| 评测 | pair accuracy、margin、token F1、引用率、拒答 balanced accuracy、生成长度 | 如何防止用单一偏好分数掩盖任务能力退化？ |
+Qasper 由 AllenAI 发布，PubMedQA 使用官方 `ori_pqal.json`。原始数据、生成 JSONL、向量库和模型权重不提交仓库；代码使用 MIT License。
