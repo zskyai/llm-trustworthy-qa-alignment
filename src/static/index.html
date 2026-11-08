@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Paper Evidence Desk</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, "Segoe UI", sans-serif; color: #1d2939; background: #f5f7f8; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    header { display: flex; align-items: center; justify-content: space-between; padding: 16px 24px; border-bottom: 1px solid #dce2e7; background: #fff; }
+    h1 { margin: 0; font-size: 19px; font-weight: 650; }
+    header span, .muted { color: #667085; font-size: 12px; }
+    main { display: grid; grid-template-columns: minmax(310px, .85fr) minmax(470px, 1.4fr); gap: 22px; max-width: 1440px; margin: auto; padding: 24px; }
+    h2 { margin: 0 0 13px; font-size: 15px; }
+    h3 { margin: 16px 0 8px; font-size: 13px; }
+    section { min-width: 0; }
+    .panel { padding: 16px; border: 1px solid #dce2e7; border-radius: 6px; background: #fff; }
+    input, textarea { width: 100%; border: 1px solid #cbd3da; border-radius: 4px; padding: 10px; background: #fff; font: inherit; }
+    textarea { min-height: 84px; resize: vertical; }
+    label { display: block; margin: 12px 0 6px; color: #475467; font-size: 12px; }
+    button { min-height: 38px; border: 1px solid #155eef; border-radius: 4px; padding: 8px 12px; color: #fff; background: #155eef; font: inherit; font-size: 13px; cursor: pointer; }
+    button.secondary { border-color: #cbd3da; color: #344054; background: #fff; }
+    .actions { display: flex; gap: 8px; margin-top: 12px; }
+    .paper { width: 100%; display: block; margin-top: 8px; padding: 10px; border: 1px solid #dce2e7; border-radius: 4px; background: #fff; color: #344054; text-align: left; }
+    .paper.active { border-color: #155eef; }
+    .paper strong { display: block; margin-bottom: 4px; font-size: 13px; }
+    .paper span { color: #667085; font-size: 11px; }
+    .answer { min-height: 240px; line-height: 1.6; overflow-wrap: anywhere; }
+    .answer-text { padding: 12px; background: #f8fafb; border-left: 3px solid #1570ef; font-size: 14px; }
+    .evidence { margin-top: 10px; padding: 12px 0; border-top: 1px solid #e4e7ec; }
+    .evidence strong { display: block; font-size: 12px; }
+    .evidence p { color: #475467; font-size: 13px; }
+    .feedback { display: flex; gap: 8px; margin-top: 12px; }
+    .status { min-height: 18px; margin-top: 8px; color: #b42318; font-size: 12px; }
+    .history button { color: #344054; background: #fff; border-color: #dce2e7; text-align: left; }
+    @media (max-width: 800px) { main { grid-template-columns: 1fr; padding: 14px; } header { padding: 14px; } }
+  </style>
+</head>
+<body>
+  <header><h1>Paper Evidence Desk</h1><span id="health">Connecting to Qasper…</span></header>
+  <main>
+    <section>
+      <h2>Find a paper</h2>
+      <div class="panel">
+        <label for="search">Title or abstract terms</label>
+        <input id="search" maxlength="500" placeholder="Search the Qasper paper collection">
+        <div class="actions"><button id="searchButton">Search papers</button></div>
+        <div id="papers"></div>
+        <details style="margin-top:16px"><summary>Import your own paper</summary><label for="pdfFile">Text-based PDF (up to 10 MiB)</label><input id="pdfFile" type="file" accept="application/pdf,.pdf"><button id="importPdf" style="margin-top:8px">Import and select paper</button><p class="muted">Original PDF and page references are retained. Check extracted text against the original for multi-column papers.</p></details>
+      </div>
+      <div class="history" style="margin-top:18px"><h2>Recent questions</h2><div id="history"></div></div>
+    </section>
+    <section>
+      <h2 id="paperTitle">Select a paper</h2>
+      <div class="panel">
+        <div class="muted" id="paperMeta">Question answers will be saved with their evidence and review feedback.</div>
+        <label for="question">Question</label>
+        <textarea id="question" maxlength="2000" placeholder="Ask about a result, method, cohort, or limitation in the selected paper"></textarea>
+        <label for="topk">Evidence paragraphs</label>
+        <input id="topk" type="number" min="1" max="20" value="6">
+        <label for="mode">Answer method</label><select id="mode"><option value="extractive">Source excerpts</option><option value="verified_model">Local model + citation / NLI verification</option></select>
+        <div class="actions"><button id="askButton">Find evidence</button></div>
+        <div class="status" id="message" role="status"></div>
+      </div>
+      <div class="panel answer" id="answer" style="margin-top:14px"><span class="muted">Evidence excerpts will appear here with section and paragraph references.</span></div>
+    </section>
+  </main>
+<script>
+const $ = (id) => document.getElementById(id);
+let selectedPaper = null;
+let activeQuestion = null;
+let historyPage = 0;
+async function api(path, options = {}) {
+  const response = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || response.statusText);
+  return data;
+}
+function esc(value) { return String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'": "&#39;" })[char]); }
+async function search() {
+  const q = $("search").value.trim(); if (!q) return;
+  try {
+    const rows = await api(`/v1/papers?query=${encodeURIComponent(q)}&limit=10`);
+    $("papers").innerHTML = rows.map((paper) => `<button class="paper ${paper.paper_id === selectedPaper ? "active" : ""}" data-id="${esc(paper.paper_id)}"><strong>${esc(paper.title)}</strong><span>${esc(paper.paper_id)} · ${paper.paragraph_count} paragraphs · score ${paper.score.toFixed(2)}</span></button>`).join("") || '<p class="muted">No matching paper.</p>';
+    document.querySelectorAll(".paper").forEach((button) => button.addEventListener("click", () => selectPaper(button.dataset.id)));
+  } catch (error) { $("message").textContent = error.message; }
+}
+async function selectPaper(id) {
+  try {
+    const paper = await api(`/v1/papers/${encodeURIComponent(id)}`); selectedPaper = id;
+    $("paperTitle").textContent = paper.title;
+    $("paperMeta").textContent = `${paper.paper_id} · ${paper.paragraph_count} full-text paragraphs`;
+    if (paper.source?.kind === "uploaded_pdf") {
+      const link = document.createElement("a"); link.href = `/v1/library/${encodeURIComponent(id)}/pdf`; link.target = "_blank"; link.rel = "noopener"; link.textContent = " Open original PDF"; $("paperMeta").appendChild(link);
+    }
+    await search();
+  } catch (error) { $("message").textContent = error.message; }
+}
+function renderQuestion(item) {
+  activeQuestion = item.question_id;
+  selectedPaper = item.paper_id;
+  $("paperTitle").textContent = item.result.title || item.paper_id;
+  $("question").value = item.question;
+  $("paperMeta").textContent = `${item.paper_id} · ${item.result.source?.kind || 'saved research question'}`;
+  if (item.result.source?.kind === "uploaded_pdf") { const link = document.createElement("a"); link.href = `/v1/library/${encodeURIComponent(item.paper_id)}/pdf`; link.target = "_blank"; link.textContent = " Open original PDF"; $("paperMeta").appendChild(link); }
+  const result = item.result;
+  $("message").textContent = result.review_context ? 'Evaluation review · ' + result.review_context.split : '';
+  const evidence = (result.evidence || []).map((entry) => `<article class="evidence"><strong>${esc(entry.section)} · ${esc(entry.paragraph_id)} · ${esc(entry.evidence_id)}</strong>${entry.sentences.map((sentence) => `<p>Sentence ${sentence.sentence_index}: ${esc(sentence.text)}</p>`).join("")}<button class="secondary" data-source="${esc(entry.paragraph_id)}">Open full paragraph</button><pre hidden></pre></article>`).join("");
+  $("answer").innerHTML = `<div class="muted">${esc(result.title)} · ${esc(item.created_at)} · ${result.answer_mode || "retrieval"}</div><h3>${esc(item.question)}</h3>${result.abstained ? `<p class="answer-text">No matching evidence found. ${esc(result.abstention_reason)}</p>` : `<p class="answer-text">${esc(result.answer)}</p>`}<h3>Source passages</h3>${evidence || '<p class="muted">No passages returned.</p>'}<div class="feedback"><button data-helpful="true">Useful</button><button class="secondary" data-helpful="false">Needs review</button></div><div class="status" id="feedbackStatus"></div>`;
+  document.querySelectorAll("[data-helpful]").forEach((button) => button.addEventListener("click", () => sendFeedback(button.dataset.helpful === "true")));
+  $("answer").insertAdjacentHTML("beforeend", `<p><a href="/v1/questions/${encodeURIComponent(activeQuestion)}/report">Download evidence report</a></p><details><summary>Execution trace and token usage</summary><pre>${esc(JSON.stringify({trace: result.trace, model_events: result.model_events, usage: result.usage, provenance: result.provenance, timings_ms: result.timings_ms}, null, 2))}</pre></details><label for="feedbackNote">Review note</label><input id="feedbackNote" maxlength="1000">`);
+  document.querySelectorAll("[data-source]").forEach(button => button.addEventListener("click", async () => {
+    try { const source = await api(`/v1/papers/${encodeURIComponent(selectedPaper)}/paragraphs/${encodeURIComponent(button.dataset.source)}`); button.nextElementSibling.hidden = false; button.nextElementSibling.style.whiteSpace = "pre-wrap"; button.nextElementSibling.textContent = source.text; } catch(error) { $("message").textContent = error.message; }
+  }));
+}
+async function ask() {
+  if (!selectedPaper) { $("message").textContent = "Select a paper first."; return; }
+  const button = $("askButton"); button.disabled = true; $("message").textContent = "Searching sections and passages…";
+  try {
+    const item = await api("/v1/questions", { method: "POST", body: JSON.stringify({ paper_id: selectedPaper, question: $("question").value, top_k: Number($("topk").value), mode: $("mode").value }) });
+    renderQuestion(item); $("message").textContent = "Question and evidence saved."; loadHistory();
+  } catch (error) { $("message").textContent = error.message; }
+  finally { button.disabled = false; }
+}
+async function sendFeedback(helpful) {
+  try {
+    await api(`/v1/questions/${encodeURIComponent(activeQuestion)}/feedback`, { method: "POST", body: JSON.stringify({ helpful, note: $("feedbackNote").value }) });
+    $("feedbackStatus").textContent = "Feedback saved."; loadHistory();
+  } catch (error) { $("feedbackStatus").textContent = error.message; }
+}
+async function loadHistory() {
+  try {
+    const rows = await api('/v1/questions?limit=12&offset=' + (historyPage * 12));
+    $("history").innerHTML = rows.map((item) => `<button class="paper" data-question="${esc(item.question_id)}"><strong>${esc(item.question)}</strong><span>${esc(item.result.title)} · ${item.feedback.length} feedback</span></button>`).join("") || '<span class="muted">No saved questions.</span>';
+    document.querySelectorAll("[data-question]").forEach((button) => button.addEventListener("click", async () => renderQuestion(await api(`/v1/questions/${encodeURIComponent(button.dataset.question)}`))));
+  } catch (error) { $("message").textContent = error.message; }
+}
+$("history").insertAdjacentHTML("afterend", '<div class="actions"><button class="secondary" id="previousHistory">Previous</button><button class="secondary" id="nextHistory">Next</button></div>');
+$("previousHistory").onclick = () => { if (historyPage > 0) { historyPage--; loadHistory(); } };
+$("nextHistory").onclick = () => { historyPage++; loadHistory(); };
+$("searchButton").addEventListener("click", search);
+$("search").addEventListener("keydown", (event) => { if (event.key === "Enter") search(); });
+$("askButton").addEventListener("click", ask);
+$("importPdf").addEventListener("click", async () => {
+  const file = $("pdfFile").files[0]; if (!file) { $("message").textContent = "Select a PDF first."; return; }
+  if(file.size > 10*1024*1024) { $("message").textContent = "PDF exceeds 10 MiB."; return; }
+  const button = $("importPdf"); button.disabled = true;
+  try {
+    $("message").textContent = "Extracting PDF pages…";
+    const response = await fetch(`/v1/library/pdf?filename=${encodeURIComponent(file.name)}`, {method:"POST", headers:{"Content-Type":"application/pdf"}, body:file});
+    const data = await response.json(); if(!response.ok) throw new Error(data.detail || response.statusText);
+    await selectPaper(data.paper.paper_id); $("message").textContent = data.created ? "Paper imported. Review source text before relying on extracted passages." : "This PDF is already in your library.";
+  } catch(error) { $("message").textContent = error.message; } finally { button.disabled = false; }
+});
+api("/healthz").then((data) => $("health").textContent = `${data.papers.toLocaleString()} research documents`).catch(() => $("health").textContent = "Service unavailable");
+loadHistory();
+</script>
+</body>
+</html>

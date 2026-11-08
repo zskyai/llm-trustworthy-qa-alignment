@@ -11,15 +11,20 @@ from pathlib import Path
 
 def norm(s): return re.sub(r"[^a-z0-9]+", " ", str(s or "").lower()).strip()
 def near_dups(items, threshold=.92):
-    # MinHash-style 5-gram signatures: cheap, deterministic and suitable for audit.
-    buckets = {}; pairs=[]
+    # Exact token-set Jaccard using an inverted index, with no hash-equality gate.
+    if not 0 < threshold <= 1: raise ValueError('threshold must be in (0, 1]')
+    postings = {}; seen = []; pairs=[]
     for key, text in items:
-        grams = {text[i:i+5] for i in range(max(0,len(text)-4))}
-        sig = hashlib.sha1(" ".join(sorted(grams)).encode()).hexdigest()[:8]
-        for other, old in buckets.get(sig, []):
-            a,b=set(text.split()),set(old.split()); score=len(a&b)/max(len(a|b),1)
-            if score >= threshold: pairs.append({"a":other,"b":key,"jaccard":score})
-        buckets.setdefault(sig, []).append((key,text))
+        tokens = set(norm(text).split())
+        if not tokens: continue
+        intersections = Counter()
+        for token in tokens: intersections.update(postings.get(token, []))
+        for index, overlap in intersections.items():
+            other, old = seen[index]
+            score = overlap / (len(tokens) + len(old) - overlap)
+            if score >= threshold: pairs.append({'a':other,'b':key,'jaccard':score})
+        index = len(seen); seen.append((key,tokens))
+        for token in tokens: postings.setdefault(token, []).append(index)
     return pairs
 
 def qasper(path):
@@ -44,7 +49,7 @@ def pubmed(path):
     data=json.loads(path.read_text(encoding='utf8')); labels=Counter(); lengths=[]; records=[]
     for k,v in data.items():
         labels[str(v.get('final_decision','')).lower()]+=1; contexts=v.get('CONTEXTS') or []; lengths.append(sum(len(norm(x).split()) for x in contexts)); records.append((str(k),norm(v.get('QUESTION'))))
-    return {'split':'ori_pqal has no split field; official file supplied is an unlabeled 1,000-example pool', 'questions':len(data), 'label_distribution':dict(labels), 'context_word_lengths':_summary(lengths), 'near_duplicate_questions':near_dups(records), 'test_used_for_training':False}
+    return {'split':'PQA-L labeled pool; use a verified ID manifest before training', 'questions':len(data), 'label_distribution':dict(labels), 'context_word_lengths':_summary(lengths), 'near_duplicate_questions':near_dups(records), 'historical_test_exclusion':'not established by this audit; see pubmedqa_official_protocol_audit_v1'}
 
 def _summary(values):
     if not values:return {'count':0}
@@ -53,6 +58,6 @@ def _summary(values):
 
 def main():
     p=argparse.ArgumentParser(); p.add_argument('--qasper',type=Path,required=True); p.add_argument('--pubmedqa',type=Path,required=True); p.add_argument('--output',type=Path,required=True); a=p.parse_args()
-    report={'qasper':qasper(a.qasper),'pubmedqa':pubmed(a.pubmedqa),'protocol':{'test_excluded_from_sft_dpo_thresholds':True,'near_duplicate_method':'5-gram signature + token Jaccard >= .92'}}
+    report={'qasper':qasper(a.qasper),'pubmedqa':pubmed(a.pubmedqa),'protocol':{'test_excluded_from_sft_dpo_thresholds':'must be verified against training manifests; audit alone cannot establish this','near_duplicate_method':'exact token-set Jaccard >= .92 using an inverted index'}}
     a.output.parent.mkdir(parents=True,exist_ok=True); a.output.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf8'); print(json.dumps(report,ensure_ascii=False,indent=2))
 if __name__=='__main__': main()

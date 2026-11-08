@@ -38,6 +38,10 @@ class LoRALinear(nn.Module):
 
 
 def inject_lora(model):
+    # Freeze the entire backbone; wrapping q/v alone leaves all other weights
+    # trainable and silently turns adapter training into partial full tuning.
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
     count = 0
     for name, module in list(model.named_modules()):
         if not isinstance(module, nn.Linear) or not name.rsplit('.', 1)[-1] in {"q_proj", "v_proj"}:
@@ -51,7 +55,7 @@ def inject_lora(model):
 
 def save_adapter(model, tokenizer, directory: Path):
     directory.mkdir(parents=True, exist_ok=True)
-    state = {k: v.detach().cpu() for k, v in model.state_dict().items() if ".a" in k or ".b" in k}
+    state = {k: v.detach().cpu() for k, v in model.named_parameters() if k.rsplit('.', 1)[-1] in {'a', 'b'} and v.requires_grad}
     torch.save(state, directory / "adapter_model.pt"); tokenizer.save_pretrained(directory)
 
 
@@ -216,22 +220,66 @@ def generate(model, tokenizer, text: str, max_new_tokens: int):
     return tokenizer.decode(y[0, x["input_ids"].shape[1]:], skip_special_tokens=True).strip()
 
 
-def evaluate(model, tokenizer, rows: list[dict], stage: str, out: Path, max_length: int, generation_limit: int, max_new_tokens: int):
+def generate_batch(model, tokenizer, texts: list[str], max_new_tokens: int):
+    if len(texts) == 1:
+        return [generate(model, tokenizer, texts[0], max_new_tokens)]
+    padding_side = tokenizer.padding_side
+    tokenizer.padding_side = "left"
+    inputs = tokenizer(texts, return_tensors="pt", padding=True, truncation=True, max_length=512)
+    with torch.inference_mode():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+        )
+    tokenizer.padding_side = padding_side
+    prompt_width = inputs["input_ids"].shape[1]
+    return [tokenizer.decode(output[prompt_width:], skip_special_tokens=True).strip() for output in outputs]
+
+
+def evaluate(
+    model,
+    tokenizer,
+    rows: list[dict],
+    stage: str,
+    out: Path,
+    max_length: int,
+    generation_limit: int,
+    max_new_tokens: int,
+    *,
+    include_pair_metrics: bool = True,
+    generation_batch_size: int = 1,
+):
+    if generation_batch_size <= 0:
+        raise ValueError("generation_batch_size must be positive")
     model.eval(); margins = []; pair_ok = 0
-    for row in rows:
-        scores, _ = logps(model, tokenizer, row["prompt"], [row["chosen"], row["rejected"]], max_length)
-        margins.append(float(scores[0] - scores[1])); pair_ok += int(scores[0] > scores[1])
+    if include_pair_metrics:
+        for row in rows:
+            scores, _ = logps(model, tokenizer, row["prompt"], [row["chosen"], row["rejected"]], max_length)
+            margins.append(float(scores[0] - scores[1])); pair_ok += int(scores[0] > scores[1])
     generation_rows = rows if generation_limit <= 0 else rows[:generation_limit]
     outputs = []; f1s = []; valid_cite = 0; cite_den = 0; invalid = 0; answerable = answered = unans = refused = 0
-    pubmed_gold=[]; pubmed_pred=[]; citation_total=0; citation_supported=0; long_buckets=defaultdict(list)
-    for row in generation_rows:
-        pred = generate(model, tokenizer, row["prompt"], max_new_tokens)
+    qasper_answerable = qasper_answerable_answered = 0
+    qasper_pred_refusals = qasper_over_refusals = 0
+    pubmed_gold=[]; pubmed_pred=[]; citation_total=0; citation_id_valid=0; long_buckets=defaultdict(list)
+    predictions = []
+    for start in range(0, len(generation_rows), generation_batch_size):
+        batch = generation_rows[start : start + generation_batch_size]
+        predictions.extend(generate_batch(model, tokenizer, [row["prompt"] for row in batch], max_new_tokens))
+    for row, pred in zip(generation_rows, predictions):
         cites = re.findall(r"\[E(\d+)\]", pred); valid = {x[1:] for x in row["valid_citations"]}
-        bad = any(c not in valid for c in cites); invalid += int(bad); citation_total += len(cites); citation_supported += sum(c in valid for c in cites)
+        bad = any(c not in valid for c in cites); invalid += int(bad); citation_total += len(cites); citation_id_valid += sum(c in valid for c in cites)
         if row["answerable"]:
             cite_den += 1; valid_cite += int(bool(cites) and not bad); answerable += 1; answered += int(not refusal(pred))
+            if row["source"] == "qasper":
+                qasper_answerable += 1
+                qasper_answerable_answered += int(not refusal(pred))
+                qasper_over_refusals += int(refusal(pred))
         elif row["source"] == "qasper":
             unans += 1; refused += int(refusal(pred))
+        if row["source"] == "qasper": qasper_pred_refusals += int(refusal(pred))
         else:
             pubmed_gold.append(row.get("gold_label")); pubmed_pred.append(predicted_label(pred))
         f1 = token_f1(pred, row["gold_answer"]); f1s.append(f1)
@@ -242,15 +290,20 @@ def evaluate(model, tokenizer, rows: list[dict], stage: str, out: Path, max_leng
     for label in labels:
         tp=sum(g==label and p==label for g,p in zip(pubmed_gold,pubmed_pred)); fp=sum(g!=label and p==label for g,p in zip(pubmed_gold,pubmed_pred)); fn=sum(g==label and p!=label for g,p in zip(pubmed_gold,pubmed_pred))
         per_class.append((2*tp/(2*tp+fp+fn)) if (2*tp+fp+fn) else 0.0)
-    metrics = {"stage": stage, "pair_eval_count": len(rows), "pair_preference_accuracy": pair_ok / max(len(rows), 1),
-               "mean_pair_margin": sum(margins) / max(len(margins), 1), "generation_eval_count": len(generation_rows),
+    metrics = {"stage": stage, "pair_eval_count": len(margins), "pair_preference_accuracy": pair_ok / len(margins) if margins else None,
+               "mean_pair_margin": sum(margins) / len(margins) if margins else None, "generation_eval_count": len(generation_rows),
                "mean_token_f1": sum(f1s) / max(len(f1s), 1), "valid_citation_rate_on_answerable": valid_cite / cite_den if cite_den else None,
-               "citation_validity": citation_supported / citation_total if citation_total else None, "citation_support_rate": citation_supported / citation_total if citation_total else None,
+               "citation_validity": citation_id_valid / citation_total if citation_total else None,
+               "citation_id_validity": citation_id_valid / citation_total if citation_total else None, "citation_support_rate": None,
                "pubmedqa_accuracy": sum(g==p for g,p in zip(pubmed_gold,pubmed_pred))/len(pubmed_gold) if pubmed_gold else None,
                "pubmedqa_macro_f1": sum(per_class)/len(per_class) if per_class else None,
                "qasper_token_f1_by_document_length": {k: sum(v)/len(v) for k,v in long_buckets.items() if v},
-               "invalid_citation_output_rate": invalid / max(len(generation_rows), 1), "qasper_answerable_recall": answered / answerable if answerable else None,
-               "qasper_refusal_recall": refused / unans if unans else None}
+               "invalid_citation_output_rate": invalid / max(len(generation_rows), 1),
+               "qasper_answerable_recall": qasper_answerable_answered / qasper_answerable if qasper_answerable else None,
+               "all_answerable_recall": answered / answerable if answerable else None,
+               "qasper_refusal_precision": refused / qasper_pred_refusals if qasper_pred_refusals else 0.0,
+               "qasper_refusal_recall": refused / unans if unans else None,
+               "qasper_over_refusal_rate": qasper_over_refusals / qasper_answerable if qasper_answerable else None}
     (out / f"metrics_{stage}.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
     (out / f"predictions_{stage}.json").write_text(json.dumps(outputs, ensure_ascii=False, indent=2), encoding="utf-8")
     return metrics
@@ -276,19 +329,40 @@ def train_dpo(model, tokenizer, rows, reference, epochs, lr, beta, max_length):
 
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--qasper", type=Path, required=True); ap.add_argument("--pubmedqa", type=Path)
+    ap.add_argument('--pubmedqa-split-manifest', type=Path, help='Required PQA-L train/dev/test ID manifest when PubMedQA is used')
     ap.add_argument("--model", type=Path, required=True); ap.add_argument("--output-dir", type=Path, required=True)
     ap.add_argument("--max-train", type=int, default=0, help="0 uses every real training record")
     ap.add_argument("--max-generation-eval", type=int, default=0, help="0 evaluates every held-out record")
     ap.add_argument("--sft-epochs", type=int, default=1); ap.add_argument("--dpo-epochs", type=int, default=1)
     ap.add_argument("--max-length", type=int, default=384); ap.add_argument("--max-new-tokens", type=int, default=64)
     ap.add_argument("--sft-lr", type=float, default=2e-4); ap.add_argument("--dpo-lr", type=float, default=1e-4); ap.add_argument("--beta", type=float, default=.1)
-    a = ap.parse_args(); torch.manual_seed(42); random.seed(42); a.output_dir.mkdir(parents=True, exist_ok=True)
-    records = qasper_records(a.qasper) + (pubmedqa_records(a.pubmedqa) if a.pubmedqa else [])
+    a = ap.parse_args()
+    if a.pubmedqa and not a.pubmedqa_split_manifest:
+        ap.error('--pubmedqa requires --pubmedqa-split-manifest; hashing the full labeled pool can mix official test IDs into training')
+    torch.manual_seed(42); random.seed(42)
+    if a.output_dir.exists() and any(a.output_dir.iterdir()):
+        raise FileExistsError('Training output directory must be empty')
+    records = qasper_records(a.qasper)
     train, valid = split(records)
+    pubmed_protocol = None
+    if a.pubmedqa:
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from src.pubmedqa_protocol import split_records
+        pubmed_protocol = json.loads(a.pubmedqa_split_manifest.read_text(encoding='utf8'))
+        if pubmed_protocol.get('source_sha256') != hashlib.sha256(a.pubmedqa.read_bytes()).hexdigest():
+            raise ValueError('PubMedQA split manifest source hash mismatch')
+        pubmed_records = pubmedqa_records(a.pubmedqa)
+        pt, pv = split_records(pubmed_records, pubmed_protocol)
+        train.extend(pt); valid.extend(pv)
+        records.extend(pubmed_records)
+    a.output_dir.mkdir(parents=True, exist_ok=True)
     if a.max_train: train = train[:a.max_train]
     for name, data in (("train", train), ("validation", valid)):
         (a.output_dir / f"{name}.jsonl").write_text("\n".join(json.dumps(x, ensure_ascii=False) for x in data) + "\n", encoding="utf-8")
-    (a.output_dir / "dataset_summary.json").write_text(json.dumps({"records": len(records), "train": len(train), "validation": len(valid), "split": "SHA1(source:document_id), paper-level 80/20"}, indent=2), encoding="utf-8")
+    (a.output_dir / "dataset_summary.json").write_text(json.dumps({"source_records": len(records), "train": len(train), "validation": len(valid), "split": "Qasper SHA1(source:document_id); PubMedQA explicit manifest",
+        'pubmedqa_test_excluded': bool(pubmed_protocol), 'pubmedqa_protocol': pubmed_protocol.get('protocol') if pubmed_protocol else None,
+        'pubmedqa_manifest_sha256': hashlib.sha256(a.pubmedqa_split_manifest.read_bytes()).hexdigest() if pubmed_protocol else None}, indent=2), encoding="utf-8")
     from transformers import AutoModelForCausalLM, AutoTokenizer
     tok = AutoTokenizer.from_pretrained(a.model, local_files_only=True); tok.pad_token = tok.pad_token or tok.eos_token
     model = AutoModelForCausalLM.from_pretrained(a.model, local_files_only=True, torch_dtype=torch.float32, attn_implementation="eager"); model.config.use_cache = False

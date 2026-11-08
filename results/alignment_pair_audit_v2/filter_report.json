@@ -1,0 +1,23 @@
+{
+  "input_files": [
+    "repos\\llm-trustworthy-qa-alignment\\results\\alignment_train_manifest_v2.jsonl"
+  ],
+  "input_pairs": 2420,
+  "kept_pairs": 736,
+  "filtered_pairs": 1684,
+  "filter_pass_rate": 0.30413223140495865,
+  "counts": {
+    "filtered": 1684,
+    "kept": 736
+  },
+  "human_sample_size": 100,
+  "nli": {
+    "status": "real_model",
+    "model_path": "models\\cross-encoder__nli-deberta-v3-base",
+    "threshold": 0.5,
+    "pairs_scored": 8060,
+    "pair_pass_rate": 0.36983471074380164
+  },
+  "manual_review_required": true,
+  "test_used": false
+}

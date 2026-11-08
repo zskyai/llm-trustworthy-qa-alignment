@@ -14,6 +14,7 @@ class CalibrationSummary:
     selective_risk: float
     abstention_rate: float
     ece: float
+    risk_upper_bound: float
 
 
 class CoverageRiskCalibrator:
@@ -29,6 +30,7 @@ class CoverageRiskCalibrator:
         self.target_risk = target_risk
         self.bins = bins
         self.threshold: float | None = None
+        self.reject_all = False
 
     def fit(self, confidences: Sequence[float], correct: Sequence[bool]) -> float:
         if len(confidences) != len(correct) or not confidences:
@@ -38,14 +40,20 @@ class CoverageRiskCalibrator:
         feasible = []
         for threshold in candidates:
             accepted = [label for score, label in pairs if score >= threshold]
-            if accepted and 1.0 - sum(accepted) / len(accepted) <= self.target_risk:
+            errors = len(accepted) - sum(accepted)
+            if accepted and self._wilson_upper(errors, len(accepted)) <= self.target_risk:
                 feasible.append(threshold)
-        self.threshold = max(feasible) if feasible else 1.0
+        # Select the lowest feasible threshold to maximize coverage while
+        # respecting the requested validation risk.
+        self.reject_all = not feasible
+        self.threshold = min(feasible) if feasible else 1.0
         return self.threshold
 
     def predict(self, confidence: float) -> bool:
         if self.threshold is None:
             raise RuntimeError("fit must be called before predict")
+        if self.reject_all:
+            return False
         return self._clip(confidence) >= self.threshold
 
     def summarize(self, confidences: Sequence[float], correct: Sequence[bool]) -> CalibrationSummary:
@@ -54,8 +62,20 @@ class CoverageRiskCalibrator:
         accepted = [i for i, score in enumerate(confidences) if self.predict(score)]
         coverage = len(accepted) / max(len(confidences), 1)
         risk = 1.0 - sum(bool(correct[i]) for i in accepted) / len(accepted) if accepted else 0.0
+        errors = len(accepted) - sum(bool(correct[i]) for i in accepted)
+        risk_upper = self._wilson_upper(errors, len(accepted)) if accepted else 0.0
         ece = expected_calibration_error(confidences, correct, bins=self.bins)
-        return CalibrationSummary(self.threshold, coverage, risk, 1.0 - coverage, ece)
+        return CalibrationSummary(self.threshold, coverage, risk, 1.0 - coverage, ece, risk_upper)
+
+    @staticmethod
+    def _wilson_upper(errors: int, count: int, *, z: float = 1.96) -> float:
+        if count <= 0:
+            return 0.0
+        rate = errors / count
+        z2 = z * z
+        center = rate + z2 / (2 * count)
+        radius = z * math.sqrt(rate * (1.0 - rate) / count + z2 / (4 * count * count))
+        return min(1.0, (center + radius) / (1.0 + z2 / count))
 
     @staticmethod
     def _clip(value: float) -> float:

@@ -1,0 +1,14 @@
+{
+  "status": "incomplete_stopped_cpu_budget",
+  "input_pairs": 736,
+  "train_only": true,
+  "test_used": false,
+  "model": "models/Qwen2.5-0.5B-Instruct",
+  "max_length": 256,
+  "batch_size": 32,
+  "thread_count": 3,
+  "reason": "Reference margin pass exceeded CPU budget without emitting a checkpoint or metrics",
+  "next_command": "run_filtered_dpo.py with same filtered.jsonl and manifest on GPU or longer CPU window",
+  "filter_report": "results/alignment_pair_audit_v2/filter_report.json",
+  "sft_adapter": "results/pubmedqa_clean450_sft_v2/sft_adapter"
+}

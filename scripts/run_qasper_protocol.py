@@ -9,7 +9,11 @@ generation run.
 from __future__ import annotations
 import argparse, json, math, re
 from pathlib import Path
+import sys
 from collections import Counter
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from src.hierarchical_retrieval import HierarchicalParagraphRetriever
 
 def norm(s): return re.findall(r"[a-z0-9]+", str(s or "").lower())
 def f1(a,b):
@@ -50,9 +54,13 @@ def split(items):
         v=int(hashlib.sha1(x['paper_id'].encode()).hexdigest()[:8],16)/2**32
         (va if v<.2 else tr).append(x)
     return tr,va
-def select(item, mode, k, encoder=None):
+def select(item, mode, k, encoder=None, section_top_k=None):
     ps=item['paragraphs']; q=set(norm(item['question']))
     if mode=='full': return ps
+    if mode=='hierarchical':
+        return HierarchicalParagraphRetriever(ps).retrieve(
+            item['question'], top_k=k, section_top_k=section_top_k
+        )
     if mode=='dense' and encoder is not None:
         import numpy as np
         vecs=encoder.encode([item['question']]+[p['text'] for p in ps], normalize_embeddings=True, show_progress_bar=False)
@@ -71,19 +79,20 @@ def score(item, selected):
     recall=hit/len(gold)
     return {'evidence_recall':recall,'evidence_precision':precision,'evidence_f1':2*precision*recall/(precision+recall) if precision+recall else 0.0,'selected':len(selected),'gold':len(gold)}
 def main():
-    p=argparse.ArgumentParser(); p.add_argument('--qasper',type=Path,required=True); p.add_argument('--output',type=Path,required=True); p.add_argument('--top-k',type=int,default=8); p.add_argument('--dense-model',type=Path); a=p.parse_args()
+    p=argparse.ArgumentParser(); p.add_argument('--qasper',type=Path,required=True); p.add_argument('--output',type=Path,required=True); p.add_argument('--top-k',type=int,default=8); p.add_argument('--section-top-k',type=int); p.add_argument('--dense-model',type=Path); a=p.parse_args()
     all_rows=rows(a.qasper); train,valid=split(all_rows); report={'dataset':{'papers':len(set(x['paper_id'] for x in all_rows)),'questions':len(all_rows),'train_questions':len(train),'validation_questions':len(valid),'test_used':False},'baselines':{}}
     encoder=None
     if a.dense_model:
         from sentence_transformers import SentenceTransformer
         encoder=SentenceTransformer(str(a.dense_model), device='cpu')
-    for mode in ('full','bm25','dense','extractive'):
+    for mode in ('full','bm25','dense','extractive','hierarchical'):
         if mode == 'dense' and encoder is None:
             report['baselines'][mode] = {'status': 'not_run', 'reason': 'pass --dense-model with a local sentence-transformers checkpoint'}
             continue
         k=len(valid[0]['paragraphs']) if mode=='full' and valid else a.top_k
-        vals=[score(x,select(x,'full' if mode=='full' else mode,k,encoder)) for x in valid]
+        vals=[score(x,select(x,'full' if mode=='full' else mode,k,encoder,a.section_top_k)) for x in valid]
         numeric=[v for v in vals if v['evidence_recall'] is not None]
-        report['baselines'][mode]={'queries':len(valid),'answerable_queries':len(numeric),'evidence_recall':sum(v['evidence_recall'] for v in numeric)/max(len(numeric),1),'evidence_precision':sum(v['evidence_precision'] for v in numeric)/max(len(numeric),1),'evidence_f1':sum(v['evidence_f1'] for v in numeric)/max(len(numeric),1),'long_document':{'count':sum(len(x['paragraphs'])>=32 for x in valid),'evidence_recall':sum(v['evidence_recall'] for x,v in zip(valid,vals) if len(x['paragraphs'])>=32 and v['evidence_recall'] is not None)/max(sum(len(x['paragraphs'])>=32 and v['evidence_recall'] is not None for x,v in zip(valid,vals)),1)},'implementation':'sentence-transformers cosine' if mode=='dense' else 'lexical paragraph overlap' if mode!='full' else 'all paragraphs'}
+        implementation={'dense':'sentence-transformers cosine','full':'all paragraphs','hierarchical':'section-first BM25 + MMR'}.get(mode,'lexical paragraph overlap')
+        report['baselines'][mode]={'queries':len(valid),'answerable_queries':len(numeric),'evidence_recall':sum(v['evidence_recall'] for v in numeric)/max(len(numeric),1),'evidence_precision':sum(v['evidence_precision'] for v in numeric)/max(len(numeric),1),'evidence_f1':sum(v['evidence_f1'] for v in numeric)/max(len(numeric),1),'long_document':{'count':sum(len(x['paragraphs'])>=32 for x in valid),'evidence_recall':sum(v['evidence_recall'] for x,v in zip(valid,vals) if len(x['paragraphs'])>=32 and v['evidence_recall'] is not None)/max(sum(len(x['paragraphs'])>=32 and v['evidence_recall'] is not None for x,v in zip(valid,vals)),1)},'implementation':implementation}
     a.output.parent.mkdir(parents=True,exist_ok=True); a.output.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf8'); print(json.dumps(report,ensure_ascii=False,indent=2))
 if __name__=='__main__': main()

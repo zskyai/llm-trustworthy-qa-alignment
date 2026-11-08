@@ -59,6 +59,12 @@ def parse_structured_answer(payload: str | Mapping[str, Any]) -> StructuredAnswe
         data = dict(payload)
     if not isinstance(data, Mapping):
         raise ValueError("structured answer must be a JSON object")
+    if not isinstance(data.get("final_answer", ""), str):
+        raise ValueError("final_answer must be a string")
+    if not isinstance(data.get("abstained", False), bool):
+        raise ValueError("abstained must be a JSON boolean")
+    if isinstance(data.get("confidence", 0.0), bool) or not isinstance(data.get("confidence", 0.0), (int, float)):
+        raise ValueError("confidence must be a number")
     citations = data.get("citations", [])
     if not isinstance(citations, Sequence) or isinstance(citations, (str, bytes)):
         raise ValueError("citations must be a list")
@@ -70,6 +76,8 @@ def parse_structured_answer(payload: str | Mapping[str, Any]) -> StructuredAnswe
                 raise ValueError(f"invalid citation: {citation}")
             parsed.append(EvidenceCitation("E" + match.group(1)))
         elif isinstance(citation, Mapping) and citation.get("evidence_id"):
+            if citation.get("quote") is not None and not isinstance(citation["quote"], str):
+                raise ValueError("citation quote must be a string")
             parsed.append(EvidenceCitation(str(citation["evidence_id"]), citation.get("sentence_id"), citation.get("quote")))
         else:
             raise ValueError("citation must be [E#] or an evidence object")

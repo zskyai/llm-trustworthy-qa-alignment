@@ -49,7 +49,8 @@ def evaluate_predictions(rows: Sequence[Mapping[str, object]]) -> dict[str, obje
         raise ValueError("rows must not be empty")
     f1_values: list[float] = []
     citation_total = citation_valid = citation_gold = citation_recalled = 0
-    refusals = gold_refusals = correct_refusals = 0
+    refusals = gold_refusals = true_refusals = 0
+    supported_citations = citations_with_support_labels = 0
     labels_gold: list[str] = []
     labels_predicted: list[str] = []
     buckets: dict[str, list[float]] = defaultdict(list)
@@ -64,11 +65,16 @@ def evaluate_predictions(rows: Sequence[Mapping[str, object]]) -> dict[str, obje
         citation_valid += sum(item in valid_ids for item in cited)
         citation_gold += len(valid_ids)
         citation_recalled += sum(item in cited for item in valid_ids)
+        supported_ids = row.get("supported_citation_ids")
+        if supported_ids is not None:
+            support_set = set(str(item) for item in supported_ids)
+            citations_with_support_labels += len(cited)
+            supported_citations += sum(item in support_set for item in cited)
         refused = _refused(row)
         gold_refusal = not bool(row.get("answerable", True))
         refusals += int(refused)
         gold_refusals += int(gold_refusal)
-        correct_refusals += int(refused == gold_refusal)
+        true_refusals += int(refused and gold_refusal)
         if row.get("gold_label") is not None:
             labels_gold.append(str(row["gold_label"]).lower())
             labels_predicted.append(str(row.get("predicted_label", "")).lower())
@@ -81,10 +87,11 @@ def evaluate_predictions(rows: Sequence[Mapping[str, object]]) -> dict[str, obje
         "count": len(rows),
         "mean_token_f1": sum(f1_values) / len(f1_values),
         "citation_precision": citation_valid / citation_total if citation_total else 0.0,
+        "citation_id_validity": citation_valid / citation_total if citation_total else None,
         "citation_recall": citation_recalled / citation_gold if citation_gold else 0.0,
-        "citation_support_rate": citation_valid / citation_total if citation_total else 0.0,
-        "refusal_precision": correct_refusals / refusals if refusals else 0.0,
-        "refusal_recall": correct_refusals / gold_refusals if gold_refusals else None,
+        "citation_support_rate": supported_citations / citations_with_support_labels if citations_with_support_labels else None,
+        "refusal_precision": true_refusals / refusals if refusals else 0.0,
+        "refusal_recall": true_refusals / gold_refusals if gold_refusals else None,
         "over_refusal_rate": sum(_refused(row) and bool(row.get("answerable", True)) for row in rows) / max(answerable, 1),
         "pubmedqa_macro_f1": _macro_f1(labels_gold, labels_predicted),
         "length_bucket_token_f1": {key: sum(values) / len(values) for key, values in buckets.items()},

@@ -1,4 +1,4 @@
-"""Run a leakage-safe DPO pilot on NLI-filtered, model-generated negatives."""
+"""Train on all supplied NLI-filtered, model-generated preference pairs."""
 from __future__ import annotations
 
 import argparse
@@ -112,7 +112,11 @@ def main():
     p.add_argument("--dpo-lr", type=float, default=1e-5)
     p.add_argument("--beta", type=float, default=.1)
     p.add_argument("--batch-size", type=int, default=4)
+    p.add_argument('--pubmedqa-split-manifest', type=Path)
     args = p.parse_args()
+    torch.set_num_threads(3)
+    if args.output_dir.exists() and any(args.output_dir.iterdir()):
+        raise FileExistsError(args.output_dir)
     torch.manual_seed(42); random.seed(42)
     rows = [json.loads(x) for path in args.pairs for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
     if not rows or not all(x.get("rejected_source") == "base_model_generation" for x in rows):
@@ -120,6 +124,20 @@ def main():
     if not all((x.get("filter_checks") or {}).get("chosen_nli_entails", not x.get("answerable", True)) and (x.get("filter_checks") or {}).get("rejected_nli_not_supported", not x.get("answerable", True)) for x in rows):
         raise ValueError("All pairs must pass the configured NLI filter")
     train, valid = split_by_document(rows)
+    pubmed_rows = [r for r in rows if r.get('source') == 'pubmedqa']
+    if pubmed_rows:
+        if not args.pubmedqa_split_manifest:
+            raise ValueError('PubMedQA preference training requires an explicit train/dev/test ID manifest')
+        protocol = json.loads(args.pubmedqa_split_manifest.read_text(encoding='utf8'))
+        train_ids, dev_ids, test_ids = (set(map(str,protocol[k])) for k in ('train_ids','validation_ids','test_ids'))
+        if train_ids & dev_ids or train_ids & test_ids or dev_ids & test_ids:
+            raise ValueError('PubMedQA protocol contains overlapping partitions')
+        ids = {str(r['document_id']) for r in pubmed_rows}
+        if ids - (train_ids | dev_ids) or ids & test_ids:
+            raise ValueError('Preference data contain test or unknown PubMedQA IDs; regenerate clean preference data')
+        qt, qv = split_by_document([r for r in rows if r.get('source') != 'pubmedqa'])
+        train = qt + [r for r in pubmed_rows if str(r['document_id']) in train_ids]
+        valid = qv + [r for r in pubmed_rows if str(r['document_id']) in dev_ids]
     if not train or not valid:
         raise ValueError("Document-level train/held-out split is empty")
 
@@ -148,7 +166,10 @@ def main():
         "preference_source": "base_model_generation_then_real_NLI_filter",
         "input_pairs": len(rows), "train_pairs": len(train), "held_out_pairs": len(valid),
         "train_documents": len({x["document_id"] for x in train}), "held_out_documents": len({x["document_id"] for x in valid}),
-        "split": "SHA1(source:document_id), with deterministic document fallback",
+        "split": {"qasper": "SHA1(source:document_id), with deterministic document fallback",
+                  "pubmedqa": protocol.get('protocol') if pubmed_rows else None,
+                  "pubmedqa_manifest": str(args.pubmedqa_split_manifest) if pubmed_rows else None,
+                  "pubmedqa_manifest_sha256": hashlib.sha256(args.pubmedqa_split_manifest.read_bytes()).hexdigest() if pubmed_rows else None},
         "test_used": False, "seed": 42, "max_length": args.max_length, "batch_size": args.batch_size, "beta": args.beta,
         "dpo_learning_rate": args.dpo_lr, "completion_logprob_reduction": "mean_per_non_prompt_token",
         "sft_seconds": sft_seconds, "dpo_seconds": dpo_seconds,
